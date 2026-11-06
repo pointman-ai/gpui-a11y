@@ -1,0 +1,17 @@
+[package]
+name = "gpui-a11y"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "A macOS accessibility tree for GPUI windows, on accesskit and accesskit_macos."
+
+# its own workspace
+[workspace]
+
+[dependencies]
+gpui = "0.2.2"
+accesskit = "0.25"
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+accesskit_macos = "0.27"
