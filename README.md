@@ -41,3 +41,7 @@ Early: about 150 lines, macOS only. Not yet done:
 - partial updates and announcements (a full tree is sent each frame)
 - text ranges: selection and caret for text fields and static text
 - a VoiceOver pass
+
+## License
+
+MIT. See [LICENSE](LICENSE).

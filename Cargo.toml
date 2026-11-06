@@ -2,6 +2,7 @@
 name = "gpui-a11y"
 version = "0.0.1"
 edition = "2024"
+license = "MIT"
 publish = false
 description = "A macOS accessibility tree for GPUI windows, on accesskit and accesskit_macos."
 
