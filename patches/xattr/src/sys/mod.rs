@@ -11,6 +11,7 @@ macro_rules! platforms {
             #[cfg(any($(target_os = $platform),*))]
             #[cfg(any(target_os = "linux", target_os = "android"))]
             pub const ENOATTR: ::libc::c_int = ::libc::ENODATA;
+            #[cfg(any($(target_os = $platform),*))]
             #[cfg(not(any(target_os = "linux", target_os = "android")))]
             pub const ENOATTR: ::libc::c_int = ::libc::ENOATTR;
         )*

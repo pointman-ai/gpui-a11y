@@ -131,9 +131,13 @@ unsafe fn forward_focus(view: *mut std::ffi::c_void) {
             }
             // a window of this class that isn't ours: what the class's superclass would have answered
             let mut class = (*this).class() as *const AnyClass;
-            let done = DONE.lock().unwrap();
-            while !class.is_null() && !done.contains(&(class as usize)) {
-                class = ffi::class_getSuperclass(class as *mut _) as *const AnyClass;
+            // the lock is dropped before the call below: the superclass's implementation may be another patched
+            // class's forwarder, which takes it again
+            {
+                let done = DONE.lock().unwrap();
+                while !class.is_null() && !done.contains(&(class as usize)) {
+                    class = ffi::class_getSuperclass(class as *mut _) as *const AnyClass;
+                }
             }
             let sup = if class.is_null() { std::ptr::null_mut() } else { ffi::class_getSuperclass(class as *mut _) };
             if sup.is_null() {
