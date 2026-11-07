@@ -45,9 +45,15 @@ impl Shared {
         let mut out = Vec::new();
         let mut stack = vec![tree.root];
         while let Some(id) = stack.pop() {
-            let node = self.nodes.get(&id)?;
+            let mut node = self.nodes.get(&id)?.clone();
+            // a child the app never sent (or no longer sends) would make accesskit reject the tree
+            if node.children().iter().any(|c| !self.nodes.contains_key(c)) {
+                let kept: Vec<NodeId> =
+                    node.children().iter().copied().filter(|c| self.nodes.contains_key(c)).collect();
+                node.set_children(kept);
+            }
             stack.extend(node.children().iter().copied());
-            out.push((id, node.clone()));
+            out.push((id, node));
         }
         let focus = self
             .focus
@@ -123,20 +129,30 @@ impl A11y {
     /// Whole or partial tree, after each render; bounds in window points.
     /// The first update must carry `tree: Some(..)`.
     pub fn update(&self, update: TreeUpdate) {
-        let partial = {
+        // What to hand the adapter. Once it holds a full tree, the update as it is. Until then, our
+        // whole merged tree: the adapter may be parked on an empty placeholder (its first query came
+        // before our first update, so `request_initial_tree` had nothing to give), and only a full
+        // tree replaces that. If there is no complete tree yet, send nothing.
+        let (send, was_given) = {
             let mut s = self.shared.lock().unwrap();
             s.merge(&update);
-            // before the adapter has been given a tree, it will ask for ours: nothing to send
-            s.initial_given
+            if s.initial_given { (Some(update), true) } else { (s.full(), false) }
         };
+        let Some(send) = send else { return };
         #[cfg(target_os = "macos")]
-        if partial {
-            if let Some(events) = self.adapter.borrow_mut().update_if_active(|| update) {
+        {
+            // `None` while the adapter is still inactive (nothing has queried this window yet): then
+            // its first query calls `request_initial_tree`, which hands over the merged tree.
+            let events = self.adapter.borrow_mut().update_if_active(|| send);
+            if let Some(events) = events {
+                if !was_given {
+                    self.shared.lock().unwrap().initial_given = true;
+                }
                 events.raise();
             }
         }
         #[cfg(not(target_os = "macos"))]
-        let _ = partial;
+        let _ = (send, was_given);
     }
 
     /// Tell the adapter whether the window is key (VoiceOver follows focus only in an active window).
