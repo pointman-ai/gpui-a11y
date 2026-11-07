@@ -4,7 +4,7 @@ version = "0.0.1"
 edition = "2024"
 license = "MIT"
 publish = false
-description = "A macOS accessibility tree for GPUI windows, on accesskit and accesskit_macos."
+description = "An accessibility tree for GPUI windows, on accesskit: macOS (VoiceOver) and Linux (AT-SPI)."
 
 # its own workspace
 [workspace]
@@ -16,3 +16,10 @@ raw-window-handle = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 accesskit_macos = "0.27"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+accesskit_unix = "0.24"
+
+# gpui -> xattr 0.2.3 does not build on Linux with current libc (ENOATTR); only used when this crate is built on its own
+[patch.crates-io]
+xattr = { path = "patches/xattr" }

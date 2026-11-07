@@ -1,4 +1,4 @@
-//! A macOS accessibility tree for GPUI windows, on accesskit and accesskit_macos.
+//! An accessibility tree for GPUI windows, on accesskit: accesskit_macos on macOS (VoiceOver), accesskit_unix on Linux (AT-SPI).
 //!
 //! ```ignore
 //! let (a11y, actions) = A11y::attach(window);
@@ -83,6 +83,15 @@ impl ActivationHandler for Activation {
     }
 }
 
+struct Deactivation(Arc<Mutex<Shared>>);
+
+#[cfg(target_os = "linux")]
+impl accesskit::DeactivationHandler for Deactivation {
+    fn deactivate_accessibility(&mut self) {
+        self.0.lock().unwrap().initial_given = false;
+    }
+}
+
 /// Queues each request and returns: see the crate docs.
 struct Actions(Sender<ActionRequest>);
 
@@ -96,8 +105,10 @@ impl ActionHandler for Actions {
 pub struct A11y {
     #[cfg(target_os = "macos")]
     adapter: RefCell<accesskit_macos::SubclassingAdapter>,
+    #[cfg(target_os = "linux")]
+    adapter: RefCell<accesskit_unix::Adapter>,
     shared: Arc<Mutex<Shared>>,
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     _p: RefCell<()>,
 }
 
@@ -105,7 +116,8 @@ impl A11y {
     /// Finds the window's NSView (raw-window-handle) and installs accesskit_macos's adapter.
     /// Call it before the window is first shown or focused if you can (right after
     /// `open_window`, in the root view's constructor); VoiceOver picks it up on its next query.
-    /// On other platforms this is a no-op.
+    /// On Linux it registers an AT-SPI adapter; the window isn't needed, and the adapter's handlers run
+    /// on its bus thread (fine: actions only go into the queue). On other platforms this is a no-op.
     ///
     /// Returns the adapter and the queue of actions that assistive tech asks for (`Click`,
     /// `SetValue`, `Focus` …). Drain it on GPUI's thread.
@@ -129,7 +141,17 @@ impl A11y {
             };
             (A11y { adapter: RefCell::new(adapter), shared }, rx)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            let _ = window;
+            let adapter = accesskit_unix::Adapter::new(
+                Activation(shared.clone()),
+                Actions(tx),
+                Deactivation(shared.clone()),
+            );
+            (A11y { adapter: RefCell::new(adapter), shared }, rx)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = (window, tx);
             (A11y { shared, _p: RefCell::new(()) }, rx)
@@ -161,7 +183,16 @@ impl A11y {
                 events.raise();
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            // a pending unix adapter wants a full tree from its first update; `update_if_active` says
+            // nothing, so count the full tree as given once sent (an inactive adapter asks for it itself)
+            if !was_given {
+                self.shared.lock().unwrap().initial_given = true;
+            }
+            self.adapter.borrow_mut().update_if_active(|| send);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let _ = (send, was_given);
     }
 
@@ -171,7 +202,9 @@ impl A11y {
         if let Some(events) = self.adapter.borrow_mut().update_view_focus_state(focused) {
             events.raise();
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        self.adapter.borrow_mut().update_window_focus_state(focused);
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let _ = focused;
     }
 }
