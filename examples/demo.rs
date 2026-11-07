@@ -18,6 +18,37 @@ fn row_id(i: usize) -> NodeId {
     NodeId(2 + i as u64)
 }
 
+/// `GPUI_A11Y_CHECK=1`: once the window has drawn, asks AppKit for the window's AXFocusedUIElement (what agent-desktop
+/// reads) and exits 0 if it is the text field the tree reports as focused (AXTextField), else 1.
+#[cfg(target_os = "macos")]
+fn check_focused_element(window: &Window) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let RawWindowHandle::AppKit(h) = HasWindowHandle::window_handle(window).unwrap().as_raw() else { std::process::exit(1) };
+    unsafe {
+        let view = h.ns_view.as_ptr() as *mut AnyObject;
+        let nswindow: *mut AnyObject = msg_send![view, window];
+        let el: *mut AnyObject = msg_send![nswindow, accessibilityFocusedUIElement];
+        let label: *mut AnyObject = if el.is_null() { std::ptr::null_mut() } else { msg_send![el, accessibilityLabel] };
+        let text = if label.is_null() {
+            String::new()
+        } else {
+            let c: *const std::ffi::c_char = msg_send![label, UTF8String];
+            std::ffi::CStr::from_ptr(c).to_string_lossy().into_owned()
+        };
+        let class = if el.is_null() { "nil".to_string() } else { (*el).class().name().to_string() };
+        let role: *mut AnyObject = if el.is_null() { std::ptr::null_mut() } else { msg_send![el, accessibilityRole] };
+        let role = if role.is_null() { String::new() } else { let c: *const std::ffi::c_char = msg_send![role, UTF8String]; std::ffi::CStr::from_ptr(c).to_string_lossy().into_owned() };
+        let cv: *mut AnyObject = msg_send![nswindow, contentView];
+        let vf: *mut AnyObject = msg_send![view, accessibilityFocusedUIElement];
+        eprintln!("contentView==ns_view: {}  view's focused element: {:?} (class {})", cv == view, vf, if vf.is_null() { "nil".into() } else { (*vf).class().name().to_string() });
+        let key: bool = msg_send![nswindow, isKeyWindow];
+        eprintln!("AXFocusedUIElement: class={class} role={role} label={text:?} window_is_key={key}");
+        std::process::exit(if role == "AXTextField" { 0 } else { 1 });
+    }
+}
+
 struct Demo {
     a11y: A11y,
     selected: usize,
@@ -75,8 +106,9 @@ impl Demo {
 }
 
 impl Render for Demo {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.a11y.update(self.tree());
+        let _ = window;
         let _ = cx;
         div()
             .size_full()
@@ -126,7 +158,7 @@ impl Render for Demo {
 fn main() {
     Application::new().run(|cx: &mut App| {
                 let bounds = Bounds::centered(None, size(px(W as f32), px(H as f32)), cx);
-        cx.open_window(
+        let handle = cx.open_window(
             WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() },
             move |window, cx| {
                 let (a11y, rx) = A11y::attach(window);
@@ -136,7 +168,23 @@ fn main() {
             },
         )
         .unwrap();
-        cx.activate(true);
+        #[cfg(target_os = "macos")]
+        if std::env::var("GPUI_A11Y_CHECK").is_ok() {
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_millis(1500)).await;
+                // the window isn't made key (that would take the keyboard): tell the adapter it is, as GPUI does on activation
+                let _ = cx.update(|cx| {
+                    handle.update(cx, |d, window, _| {
+                        d.a11y.set_window_focused(true);
+                        check_focused_element(window)
+                    })
+                });
+            })
+            .detach();
+        }
+        if std::env::var("GPUI_A11Y_CHECK").is_err() {
+            cx.activate(true);
+        }
     });
 }
 

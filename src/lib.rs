@@ -102,6 +102,78 @@ impl ActionHandler for Actions {
     }
 }
 
+/// Makes the view's window class answer AXFocusedUIElement with the view's own answer, once per class. Without it
+/// AppKit answers with the window itself, so the focused node is never the one the app reports, and AX `focus` /
+/// `set-value` from outside never reach it. (accesskit_macos's `add_focus_forwarder_to_window_class` asks the window's
+/// contentView, but GPUI's NSView is a subview of that, so it would reach the wrong view: this keeps the view with the
+/// window instead.)
+///
+/// # Safety
+/// `view` must be a live NSView, and this must run on the main thread.
+#[cfg(target_os = "macos")]
+unsafe fn forward_focus(view: *mut std::ffi::c_void) {
+    use objc2::ffi;
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, Sel};
+    use objc2::sel;
+    use std::ffi::c_void;
+    unsafe extern "C" {
+        fn class_getMethodImplementation(cls: *const c_void, sel: *const c_void) -> *const c_void;
+    }
+    static KEY: u8 = 0;
+    static DONE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+    extern "C" fn forwarder(this: *mut AnyObject, cmd: Sel) -> *mut AnyObject {
+        unsafe {
+            let view = ffi::objc_getAssociatedObject(this as *mut _, &KEY as *const u8 as *const c_void) as *mut AnyObject;
+            if !view.is_null() {
+                return msg_send![view, accessibilityFocusedUIElement];
+            }
+            // a window of this class that isn't ours: what the class's superclass would have answered
+            let mut class = (*this).class() as *const AnyClass;
+            let done = DONE.lock().unwrap();
+            while !class.is_null() && !done.contains(&(class as usize)) {
+                class = ffi::class_getSuperclass(class as *mut _) as *const AnyClass;
+            }
+            let sup = if class.is_null() { std::ptr::null_mut() } else { ffi::class_getSuperclass(class as *mut _) };
+            if sup.is_null() {
+                return std::ptr::null_mut();
+            }
+            let f = class_getMethodImplementation(sup as *const c_void, cmd.as_ptr() as *const c_void);
+            let f: extern "C" fn(*mut AnyObject, Sel) -> *mut AnyObject = std::mem::transmute(f);
+            f(this, cmd)
+        }
+    }
+
+    let view = view as *mut AnyObject;
+    // SAFETY: `view` is a live NSView.
+    let window: *mut AnyObject = unsafe { msg_send![view, window] };
+    if window.is_null() {
+        return; // not in a window yet: nothing to forward from
+    }
+    unsafe {
+        // keeps the view alive with the window (the view only holds the window weakly)
+        ffi::objc_setAssociatedObject(
+            window as *mut _,
+            &KEY as *const u8 as *const c_void,
+            view as *mut _,
+            ffi::OBJC_ASSOCIATION_RETAIN_NONATOMIC,
+        );
+        let class = (*window).class() as *const AnyClass;
+        let mut done = DONE.lock().unwrap();
+        if !done.contains(&(class as usize)) {
+            let imp: extern "C" fn(*mut AnyObject, Sel) -> *mut AnyObject = forwarder;
+            ffi::class_replaceMethod(
+                class as *mut _,
+                sel!(accessibilityFocusedUIElement).as_ptr() as _,
+                Some(std::mem::transmute::<extern "C" fn(*mut AnyObject, Sel) -> *mut AnyObject, unsafe extern "C" fn()>(imp)),
+                c"@@:".as_ptr(),
+            );
+            done.push(class as usize);
+        }
+    }
+}
+
 pub struct A11y {
     #[cfg(target_os = "macos")]
     adapter: RefCell<accesskit_macos::SubclassingAdapter>,
@@ -132,6 +204,7 @@ impl A11y {
                 panic!("gpui window is not an AppKit window");
             };
             // SAFETY: ns_view is GPUI's live NSView, and we are on the main thread.
+            unsafe { forward_focus(h.ns_view.as_ptr()) };
             let adapter = unsafe {
                 accesskit_macos::SubclassingAdapter::new(
                     h.ns_view.as_ptr(),

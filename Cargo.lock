@@ -2283,6 +2283,7 @@ dependencies = [
  "accesskit_macos",
  "accesskit_unix",
  "gpui",
+ "objc2 0.5.3",
  "raw-window-handle",
 ]
 
