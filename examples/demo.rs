@@ -3,7 +3,7 @@
 use accesskit::{Action, ActionData, ActionRequest, Node, NodeId, Rect, Role, TreeInfo, TreeUpdate};
 use gpui::{prelude::*, *};
 use gpui_a11y::A11y;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 const ROOT: NodeId = NodeId(0);
@@ -75,7 +75,7 @@ impl Demo {
 }
 
 impl Render for Demo {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.a11y.update(self.tree());
         let _ = cx;
         div()
@@ -125,14 +125,11 @@ impl Render for Demo {
 
 fn main() {
     Application::new().run(|cx: &mut App| {
-        let (tx, rx) = channel::<ActionRequest>();
-        let bounds = Bounds::centered(None, size(px(W as f32), px(H as f32)), cx);
+                let bounds = Bounds::centered(None, size(px(W as f32), px(H as f32)), cx);
         cx.open_window(
             WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() },
             move |window, cx| {
-                let a11y = A11y::attach(window, move |req| {
-                    let _ = tx.send(req);
-                });
+                let (a11y, rx) = A11y::attach(window);
                 let view = cx.new(|cx| Demo { a11y, selected: 0, text: String::new(), focus: cx.focus_handle() });
                 poll_actions(view.downgrade(), rx, cx);
                 view

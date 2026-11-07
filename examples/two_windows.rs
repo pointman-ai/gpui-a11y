@@ -3,7 +3,7 @@
 use accesskit::{Action, ActionRequest, Node, NodeId, Rect, Role, TreeInfo, TreeUpdate};
 use gpui::{prelude::*, *};
 use gpui_a11y::A11y;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 const ROOT: NodeId = NodeId(0);
@@ -59,14 +59,11 @@ impl Render for Win {
 }
 
 fn open(cx: &mut App, name: &'static str, x: f32) {
-    let (tx, rx) = channel::<ActionRequest>();
     let bounds = Bounds::new(point(px(x), px(200.)), size(px(W as f32), px(H as f32)));
     cx.open_window(
         WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() },
         move |window, cx| {
-            let a11y = A11y::attach(window, move |req| {
-                let _ = tx.send(req);
-            });
+            let (a11y, rx) = A11y::attach(window);
             // TWO_WINDOWS_LATE_TREE_MS=4000: window B sends its first tree this long after it opens
             let late = if name == "Window B" { std::env::var("TWO_WINDOWS_LATE_TREE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0) } else { 0 };
             let tree_from = std::time::Instant::now() + Duration::from_millis(late);

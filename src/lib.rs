@@ -1,19 +1,26 @@
 //! A macOS accessibility tree for GPUI windows, on accesskit and accesskit_macos.
 //!
 //! ```ignore
-//! let a11y = A11y::attach(window, |req| { /* ActionRequest: Click, SetValue, Focus … */ });
+//! let (a11y, actions) = A11y::attach(window);
 //! a11y.update(tree_update); // after each render; bounds in window points
+//! // ActionRequest: Click, SetValue, Focus … : drain `actions` on GPUI's thread, e.g. from a
+//! // task: `while let Ok(req) = actions.try_recv() { … }`
 //! ```
 //!
-//! `attach` and `update` must be called on the main thread (GPUI's UI thread). `on_action` is
-//! called on the main thread too, from inside the AppKit accessibility call: keep it short and
-//! hand the work to GPUI (e.g. send it to a channel that an `AsyncApp` task drains).
+//! `attach` and `update` must be called on the main thread (GPUI's UI thread).
+//!
+//! Actions are queued, never run in place. AppKit calls the adapter's `do_action` from inside the
+//! accessibility call, and the caller (VoiceOver, agent-desktop) waits for it to return: anything
+//! slow there, or anything that re-enters GPUI, holds the caller up. So `do_action` only sends the
+//! request to the channel `attach` returned, and returns at once; the app drains the channel
+//! itself, on GPUI's thread, whenever it likes.
 
 pub use accesskit;
 
 use accesskit::{ActionHandler, ActionRequest, ActivationHandler, Node, NodeId, TreeUpdate};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 /// What the adapter may ask for from its own callbacks: the last known tree, merged from every
@@ -76,11 +83,13 @@ impl ActivationHandler for Activation {
     }
 }
 
-struct Actions<F>(F);
+/// Queues each request and returns: see the crate docs.
+struct Actions(Sender<ActionRequest>);
 
-impl<F: Fn(ActionRequest) + Send + 'static> ActionHandler for Actions<F> {
+impl ActionHandler for Actions {
     fn do_action(&mut self, request: ActionRequest) {
-        (self.0)(request)
+        // a dropped receiver means the app no longer wants actions: nothing to do
+        let _ = self.0.send(request);
     }
 }
 
@@ -97,10 +106,11 @@ impl A11y {
     /// Call it before the window is first shown or focused if you can (right after
     /// `open_window`, in the root view's constructor); VoiceOver picks it up on its next query.
     /// On other platforms this is a no-op.
-    pub fn attach(
-        window: &gpui::Window,
-        on_action: impl Fn(ActionRequest) + Send + 'static,
-    ) -> A11y {
+    ///
+    /// Returns the adapter and the queue of actions that assistive tech asks for (`Click`,
+    /// `SetValue`, `Focus` …). Drain it on GPUI's thread.
+    pub fn attach(window: &gpui::Window) -> (A11y, Receiver<ActionRequest>) {
+        let (tx, rx) = channel();
         let shared = Arc::new(Mutex::new(Shared::default()));
         #[cfg(target_os = "macos")]
         {
@@ -114,15 +124,15 @@ impl A11y {
                 accesskit_macos::SubclassingAdapter::new(
                     h.ns_view.as_ptr(),
                     Activation(shared.clone()),
-                    Actions(on_action),
+                    Actions(tx),
                 )
             };
-            A11y { adapter: RefCell::new(adapter), shared }
+            (A11y { adapter: RefCell::new(adapter), shared }, rx)
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (window, on_action);
-            A11y { shared, _p: RefCell::new(()) }
+            let _ = (window, tx);
+            (A11y { shared, _p: RefCell::new(()) }, rx)
         }
     }
 

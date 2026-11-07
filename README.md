@@ -11,21 +11,24 @@ window. This crate attaches AccessKit's macOS adapter to a GPUI window's `NSView
 use gpui_a11y::{A11y, accesskit};
 
 // once, after opening the window (main thread)
-let a11y = A11y::attach(window, |req: accesskit::ActionRequest| {
-    // Click, SetValue, Focus …: keep it short, hand the work to GPUI (e.g. a channel)
-});
+let (a11y, actions) = A11y::attach(window);
+// `actions` is a std mpsc Receiver<accesskit::ActionRequest> (Click, SetValue, Focus …). The
+// accessibility call only queues the request and returns at once; drain it on GPUI's thread,
+// e.g. from a cx.spawn task that polls `actions.try_recv()`.
 
 // after each render
 a11y.update(tree_update);          // bounds in window points
 a11y.set_window_focused(true);     // on window activation changes
 ```
 
-`attach`, `update` and the action callback all run on the main thread.
+`attach` and `update` run on the main thread. Actions are queued, not run in place: AppKit's
+caller (VoiceOver, agent-desktop) waits for the accessibility call to return, so nothing runs in it.
 
 ## Example
 
 ```sh
 cargo run --example demo
+cargo run --example two_windows   # two windows, each with its own tree
 ```
 
 A window with a list of three rows and a text field. Clicking a row and setting the field's
