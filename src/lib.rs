@@ -13,7 +13,9 @@
 //! can skip building it until then: `is_active` says whether one is reading, and `take_asked` says, once, that one
 //! has just asked. Its first query gets the last tree `update` gave, or an empty placeholder if there was none; the
 //! app's next `update` then replaces it with the full tree. Poll `take_asked` (a timer, as for the actions) and
-//! update at once: a window that's hidden draws no frames, so waiting for one could wait for ever.
+//! update at once: a window that's hidden draws no frames, so waiting for one could wait for ever. To spare the first
+//! query the placeholder, `update` once the window settles while nothing reads it: the tree is kept for a reader to come
+//! (`has_tree` says whether one is, so a Linux app can send another after AT-SPI let go and the kept one was forgotten).
 //!
 //! Actions are queued, never run in place. AppKit calls the adapter's `do_action` from inside the
 //! accessibility call, and the caller (VoiceOver, agent-desktop) waits for it to return: anything
@@ -91,7 +93,6 @@ impl Shared {
 
     /// Nothing reads the tree any more (Linux: AT-SPI is off): forget it, as the app may stop sending it now, so a
     /// reader that comes back waits for the app's full tree rather than getting a stale one.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn deactivate(&mut self) {
         *self = Shared::default();
     }
@@ -286,9 +287,22 @@ impl A11y {
         self.shared.lock().unwrap().activate()
     }
 
+    /// A reader letting go, as AT-SPI going off does on Linux (the adapter's deactivation; macOS's never lets go): the
+    /// tree is forgotten. For a detached A11y (tests): an attached one's adapter lets go by itself.
+    pub fn let_go(&self) {
+        self.shared.lock().unwrap().deactivate();
+    }
+
     /// The tree as kept, merged from every `update`: what a reader that asked now would get.
     pub fn tree(&self) -> Option<TreeUpdate> {
         self.shared.lock().unwrap().full()
+    }
+
+    /// Whether a tree is kept for a reader: an `update` came since the start, or (Linux) since the reader last let go.
+    /// Cheap, unlike `tree`. While it's false a reader's first query gets the empty placeholder, so an app that skips
+    /// building its tree while nothing reads it should send one.
+    pub fn has_tree(&self) -> bool {
+        self.shared.lock().unwrap().tree.is_some()
     }
 
     /// Whole or partial tree, after each render; bounds in window points.
@@ -436,9 +450,24 @@ mod tests {
         assert!(a11y.ask().is_none(), "nothing sent yet: the placeholder");
         assert!(a11y.is_active());
         assert!(a11y.take_asked() && !a11y.take_asked(), "the app hears it once");
+        assert!(!a11y.has_tree());
         a11y.update(tree());
+        assert!(a11y.has_tree());
         let kept = a11y.tree().expect("the tree it was sent");
         assert_eq!((kept.nodes.len(), kept.focus), (2, NodeId(1)));
         assert!(actions.try_recv().is_err(), "no actions come");
+
+        // the reader lets go: nothing reads it, and the tree is forgotten
+        a11y.let_go();
+        assert!(!a11y.is_active() && !a11y.has_tree() && a11y.tree().is_none());
+    }
+
+    #[test]
+    fn a_tree_sent_while_nothing_reads_it_is_kept_and_handed_to_the_first_reader() {
+        let (a11y, _actions) = A11y::detached();
+        a11y.update(tree());
+        assert!(!a11y.is_active() && a11y.has_tree(), "kept, for a reader to come");
+        let first = a11y.ask().expect("the kept tree, not the placeholder");
+        assert_eq!((first.nodes.len(), first.focus), (2, NodeId(1)));
     }
 }
